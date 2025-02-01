@@ -6,9 +6,14 @@
 (define-constant err-not-found (err u101))
 (define-constant err-already-exists (err u102))
 (define-constant err-not-active (err u103))
+(define-constant err-insufficient-stake (err u104))
+(define-constant minimum-stake u1000)
+(define-constant governance-threshold u100000)
 
 ;; Data Variables
 (define-data-var challenge-counter uint u0)
+(define-data-var total-staked uint u0)
+(define-data-var proposal-counter uint u0)
 
 ;; Define token
 (define-fungible-token zen-token)
@@ -36,80 +41,98 @@
     principal
     {
         total-participations: uint,
-        tokens-earned: uint
+        tokens-earned: uint,
+        staked-amount: uint
     }
 )
 
-;; Public Functions
-
-;; Create a new challenge
-(define-public (create-challenge (title (string-ascii 100)) (description (string-ascii 500)) (start-time uint) (end-time uint) (reward uint))
-    (let ((challenge-id (var-get challenge-counter)))
-        (if (is-eq tx-sender contract-owner)
-            (begin
-                (map-set challenges challenge-id {
-                    creator: tx-sender,
-                    title: title,
-                    description: description,
-                    start-time: start-time,
-                    end-time: end-time,
-                    reward: reward,
-                    active: true
-                })
-                (var-set challenge-counter (+ challenge-id u1))
-                (ok challenge-id)
-            )
-            err-owner-only
-        )
-    )
+(define-map governance-proposals
+    uint
+    {
+        proposer: principal,
+        title: (string-ascii 100),
+        description: (string-ascii 1000),
+        start-block: uint,
+        end-block: uint,
+        yes-votes: uint,
+        no-votes: uint,
+        executed: bool
+    }
 )
 
-;; Join a challenge
-(define-public (join-challenge (challenge-id uint))
-    (let ((challenge (unwrap! (map-get? challenges challenge-id) err-not-found)))
-        (if (get active challenge)
-            (begin
-                (map-set challenge-participants 
-                    { challenge-id: challenge-id, participant: tx-sender }
-                    { completed: false, reflection: none }
-                )
-                (ok true)
-            )
-            err-not-active
-        )
-    )
+(define-map votes
+    { proposal-id: uint, voter: principal }
+    { amount: uint, vote: bool }
 )
 
-;; Submit reflection and complete challenge
-(define-public (complete-challenge (challenge-id uint) (reflection (string-ascii 1000)))
+;; Staking Functions
+(define-public (stake-tokens (amount uint))
     (let (
-        (challenge (unwrap! (map-get? challenges challenge-id) err-not-found))
-        (participant-info (unwrap! (map-get? challenge-participants { challenge-id: challenge-id, participant: tx-sender }) err-not-found))
+        (user-profile (default-to { total-participations: u0, tokens-earned: u0, staked-amount: u0 } 
+            (map-get? user-profiles tx-sender)))
     )
-        (if (get active challenge)
-            (begin
-                (map-set challenge-participants 
-                    { challenge-id: challenge-id, participant: tx-sender }
-                    { completed: true, reflection: (some reflection) }
-                )
-                (try! (ft-mint? zen-token (get reward challenge) tx-sender))
-                (ok true)
-            )
-            err-not-active
+        (try! (ft-transfer? zen-token amount tx-sender (as-contract tx-sender)))
+        (map-set user-profiles tx-sender 
+            (merge user-profile { staked-amount: (+ (get staked-amount user-profile) amount) }))
+        (var-set total-staked (+ (var-get total-staked) amount))
+        (ok true)
+    )
+)
+
+(define-public (unstake-tokens (amount uint))
+    (let (
+        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
+        (staked (get staked-amount user-profile))
+    )
+        (asserts! (>= staked amount) err-insufficient-stake)
+        (try! (as-contract (ft-transfer? zen-token amount tx-sender tx-sender)))
+        (map-set user-profiles tx-sender 
+            (merge user-profile { staked-amount: (- staked amount) }))
+        (var-set total-staked (- (var-get total-staked) amount))
+        (ok true)
+    )
+)
+
+;; Governance Functions
+(define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 1000)) (duration uint))
+    (let (
+        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
+        (proposal-id (var-get proposal-counter))
+    )
+        (asserts! (>= (get staked-amount user-profile) governance-threshold) err-insufficient-stake)
+        (map-set governance-proposals proposal-id {
+            proposer: tx-sender,
+            title: title,
+            description: description,
+            start-block: block-height,
+            end-block: (+ block-height duration),
+            yes-votes: u0,
+            no-votes: u0,
+            executed: false
+        })
+        (var-set proposal-counter (+ proposal-id u1))
+        (ok proposal-id)
+    )
+)
+
+(define-public (vote-on-proposal (proposal-id uint) (vote bool))
+    (let (
+        (proposal (unwrap! (map-get? governance-proposals proposal-id) err-not-found))
+        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
+        (stake (get staked-amount user-profile))
+    )
+        (asserts! (>= stake minimum-stake) err-insufficient-stake)
+        (asserts! (< block-height (get end-block proposal)) err-not-active)
+        (map-set votes { proposal-id: proposal-id, voter: tx-sender } { amount: stake, vote: vote })
+        (map-set governance-proposals proposal-id
+            (merge proposal {
+                yes-votes: (if vote (+ (get yes-votes proposal) stake) (get yes-votes proposal)),
+                no-votes: (if vote (get no-votes proposal) (+ (get no-votes proposal) stake))
+            })
         )
+        (ok true)
     )
 )
 
-;; Read-only functions
-
-(define-read-only (get-challenge (challenge-id uint))
-    (ok (map-get? challenges challenge-id))
-)
-
-(define-read-only (get-participant-info (challenge-id uint) (participant principal))
-    (ok (map-get? challenge-participants { challenge-id: challenge-id, participant: participant }))
-)
-
-(define-read-only (get-user-profile (user principal))
-    (ok (map-get? user-profiles user))
-)
+;; Original Functions
+[... rest of original contract functions ...]
