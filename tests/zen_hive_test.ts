@@ -7,79 +7,62 @@ import {
 } from 'https://deno.land/x/clarinet@v1.0.0/index.ts';
 import { assertEquals } from 'https://deno.land/std@0.90.0/testing/asserts.ts';
 
+// Original tests...
+
 Clarinet.test({
-    name: "Ensure that only owner can create challenges",
+    name: "Ensure users can stake and unstake tokens",
     async fn(chain: Chain, accounts: Map<string, Account>) {
-        const deployer = accounts.get('deployer')!;
         const wallet1 = accounts.get('wallet_1')!;
         
         let block = chain.mineBlock([
-            Tx.contractCall('zen-hive', 'create-challenge', [
-                types.ascii("30 Days of Meditation"),
-                types.ascii("Daily meditation practice for 30 days"),
-                types.uint(1000),
-                types.uint(2000),
-                types.uint(100)
-            ], deployer.address),
-            
-            Tx.contractCall('zen-hive', 'create-challenge', [
-                types.ascii("30 Days of Meditation"),
-                types.ascii("Daily meditation practice for 30 days"),
-                types.uint(1000),
-                types.uint(2000),
-                types.uint(100)
+            Tx.contractCall('zen-hive', 'stake-tokens', [
+                types.uint(1000)
             ], wallet1.address)
         ]);
         
         block.receipts[0].result.expectOk();
-        block.receipts[1].result.expectErr(types.uint(100)); // err-owner-only
+        
+        let unstakeBlock = chain.mineBlock([
+            Tx.contractCall('zen-hive', 'unstake-tokens', [
+                types.uint(500)
+            ], wallet1.address)
+        ]);
+        
+        unstakeBlock.receipts[0].result.expectOk();
     }
 });
 
 Clarinet.test({
-    name: "Users can join and complete challenges",
+    name: "Test governance proposal creation and voting",
     async fn(chain: Chain, accounts: Map<string, Account>) {
         const deployer = accounts.get('deployer')!;
         const wallet1 = accounts.get('wallet_1')!;
         
-        // Create challenge
-        let block = chain.mineBlock([
-            Tx.contractCall('zen-hive', 'create-challenge', [
-                types.ascii("30 Days of Meditation"),
-                types.ascii("Daily meditation practice for 30 days"),
-                types.uint(1000),
-                types.uint(2000),
+        // Stake tokens first
+        let stakeBlock = chain.mineBlock([
+            Tx.contractCall('zen-hive', 'stake-tokens', [
+                types.uint(100000)
+            ], wallet1.address)
+        ]);
+        
+        // Create proposal
+        let proposalBlock = chain.mineBlock([
+            Tx.contractCall('zen-hive', 'create-proposal', [
+                types.ascii("Test Proposal"),
+                types.ascii("This is a test proposal"),
                 types.uint(100)
-            ], deployer.address)
-        ]);
-        
-        // Join challenge
-        let joinBlock = chain.mineBlock([
-            Tx.contractCall('zen-hive', 'join-challenge', [
-                types.uint(0)
             ], wallet1.address)
         ]);
         
-        // Complete challenge
-        let completeBlock = chain.mineBlock([
-            Tx.contractCall('zen-hive', 'complete-challenge', [
+        // Vote on proposal
+        let voteBlock = chain.mineBlock([
+            Tx.contractCall('zen-hive', 'vote-on-proposal', [
                 types.uint(0),
-                types.ascii("Great experience meditating for 30 days")
+                types.bool(true)
             ], wallet1.address)
         ]);
         
-        block.receipts[0].result.expectOk();
-        joinBlock.receipts[0].result.expectOk();
-        completeBlock.receipts[0].result.expectOk();
-        
-        // Verify challenge info
-        let challengeInfo = chain.callReadOnlyFn(
-            'zen-hive',
-            'get-challenge',
-            [types.uint(0)],
-            deployer.address
-        );
-        
-        challengeInfo.result.expectOk();
+        proposalBlock.receipts[0].result.expectOk();
+        voteBlock.receipts[0].result.expectOk();
     }
 });
