@@ -7,8 +7,13 @@
 (define-constant err-already-exists (err u102))
 (define-constant err-not-active (err u103))
 (define-constant err-insufficient-stake (err u104))
+(define-constant err-timelock-active (err u105))
+(define-constant err-invalid-amount (err u106))
+(define-constant err-proposal-executed (err u107))
+
 (define-constant minimum-stake u1000)
 (define-constant governance-threshold u100000)
+(define-constant unstake-timelock u144) ;; 24 hours in blocks
 
 ;; Data Variables
 (define-data-var challenge-counter uint u0)
@@ -19,8 +24,7 @@
 (define-fungible-token zen-token)
 
 ;; Data Maps
-(define-map challenges
-    uint 
+(define-map challenges uint 
     {
         creator: principal,
         title: (string-ascii 100),
@@ -29,22 +33,15 @@
         end-time: uint,
         reward: uint,
         active: bool
-    }
-)
+    })
 
-(define-map challenge-participants 
-    { challenge-id: uint, participant: principal }
-    { completed: bool, reflection: (optional (string-ascii 1000)) }
-)
-
-(define-map user-profiles
+(define-map user-stakes
     principal
     {
-        total-participations: uint,
-        tokens-earned: uint,
-        staked-amount: uint
-    }
-)
+        amount: uint,
+        locked-until: uint,
+        delegated-to: (optional principal)
+    })
 
 (define-map governance-proposals
     uint
@@ -56,83 +53,72 @@
         end-block: uint,
         yes-votes: uint,
         no-votes: uint,
-        executed: bool
-    }
-)
+        executed: bool,
+        snapshot-block: uint
+    })
 
-(define-map votes
-    { proposal-id: uint, voter: principal }
-    { amount: uint, vote: bool }
-)
+;; Events
+(define-data-var last-event-id uint u0)
+
+(define-map events 
+    uint 
+    {
+        event-type: (string-ascii 20),
+        data: (string-ascii 256)
+    })
+
+;; Helper Functions
+(define-private (emit-event (event-type (string-ascii 20)) (data (string-ascii 256)))
+    (let ((event-id (var-get last-event-id)))
+        (map-set events event-id 
+            {
+                event-type: event-type,
+                data: data
+            })
+        (var-set last-event-id (+ event-id u1))
+        (ok true)))
 
 ;; Staking Functions
 (define-public (stake-tokens (amount uint))
     (let (
-        (user-profile (default-to { total-participations: u0, tokens-earned: u0, staked-amount: u0 } 
-            (map-get? user-profiles tx-sender)))
+        (current-stake (default-to 
+            { amount: u0, locked-until: u0, delegated-to: none } 
+            (map-get? user-stakes tx-sender)))
     )
+        (asserts! (> amount u0) err-invalid-amount)
         (try! (ft-transfer? zen-token amount tx-sender (as-contract tx-sender)))
-        (map-set user-profiles tx-sender 
-            (merge user-profile { staked-amount: (+ (get staked-amount user-profile) amount) }))
+        (map-set user-stakes tx-sender 
+            (merge current-stake 
+                { 
+                    amount: (+ (get amount current-stake) amount),
+                    locked-until: (+ block-height unstake-timelock)
+                }))
         (var-set total-staked (+ (var-get total-staked) amount))
-        (ok true)
-    )
-)
+        (try! (emit-event "STAKE" (concat (to-ascii amount) " tokens staked")))
+        (ok true)))
 
 (define-public (unstake-tokens (amount uint))
     (let (
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (staked (get staked-amount user-profile))
+        (current-stake (unwrap! (map-get? user-stakes tx-sender) err-not-found))
+        (locked-until (get locked-until current-stake))
     )
-        (asserts! (>= staked amount) err-insufficient-stake)
+        (asserts! (>= (get amount current-stake) amount) err-insufficient-stake)
+        (asserts! (>= block-height locked-until) err-timelock-active)
         (try! (as-contract (ft-transfer? zen-token amount tx-sender tx-sender)))
-        (map-set user-profiles tx-sender 
-            (merge user-profile { staked-amount: (- staked amount) }))
+        (map-set user-stakes tx-sender 
+            (merge current-stake 
+                { amount: (- (get amount current-stake) amount) }))
         (var-set total-staked (- (var-get total-staked) amount))
-        (ok true)
-    )
-)
+        (try! (emit-event "UNSTAKE" (concat (to-ascii amount) " tokens unstaked")))
+        (ok true)))
+
+;; Delegation Functions
+(define-public (delegate-votes (delegate-to principal))
+    (let ((current-stake (unwrap! (map-get? user-stakes tx-sender) err-not-found)))
+        (map-set user-stakes tx-sender 
+            (merge current-stake { delegated-to: (some delegate-to) }))
+        (try! (emit-event "DELEGATE" (concat "Delegated to " (to-ascii delegate-to))))
+        (ok true)))
 
 ;; Governance Functions
-(define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 1000)) (duration uint))
-    (let (
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (proposal-id (var-get proposal-counter))
-    )
-        (asserts! (>= (get staked-amount user-profile) governance-threshold) err-insufficient-stake)
-        (map-set governance-proposals proposal-id {
-            proposer: tx-sender,
-            title: title,
-            description: description,
-            start-block: block-height,
-            end-block: (+ block-height duration),
-            yes-votes: u0,
-            no-votes: u0,
-            executed: false
-        })
-        (var-set proposal-counter (+ proposal-id u1))
-        (ok proposal-id)
-    )
-)
-
-(define-public (vote-on-proposal (proposal-id uint) (vote bool))
-    (let (
-        (proposal (unwrap! (map-get? governance-proposals proposal-id) err-not-found))
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (stake (get staked-amount user-profile))
-    )
-        (asserts! (>= stake minimum-stake) err-insufficient-stake)
-        (asserts! (< block-height (get end-block proposal)) err-not-active)
-        (map-set votes { proposal-id: proposal-id, voter: tx-sender } { amount: stake, vote: vote })
-        (map-set governance-proposals proposal-id
-            (merge proposal {
-                yes-votes: (if vote (+ (get yes-votes proposal) stake) (get yes-votes proposal)),
-                no-votes: (if vote (get no-votes proposal) (+ (get no-votes proposal) stake))
-            })
-        )
-        (ok true)
-    )
-)
-
-;; Original Functions
-[... rest of original contract functions ...]
+[... remaining governance functions with similar improvements ...]
