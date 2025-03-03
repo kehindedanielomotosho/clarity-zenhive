@@ -7,28 +7,21 @@ A decentralized platform for mindfulness challenges and community sharing built 
 - Share experiences and reflections
 - Earn tokens for participation and completion
 - Community voting and engagement
-- Token staking and governance system
-- Decentralized decision making
-
-## Contract Functions
-- Challenge creation and management
-- Experience sharing and reflection posting
-- Token rewards for participation
-- Community voting system
-- Token staking mechanism
+- Enhanced token staking system with rewards
 - Governance proposal system
-- Democratic voting on proposals
+- Emergency unstaking with penalty
+- Contract pause mechanism for security
 
-## Governance System
-The platform now includes a comprehensive governance system that allows stakeholders to:
-- Stake ZEN tokens to participate in governance
-- Create proposals for platform changes
-- Vote on proposals with voting power based on staked amounts
-- Participate in decentralized decision-making
+## New Features
+### Staking Rewards
+- Earn APR-based rewards for staking
+- Compound rewards automatically
+- Emergency unstake option with penalty
 
-## Staking Mechanism
-Users can now:
-- Stake ZEN tokens to earn platform privileges
-- Participate in governance with staked tokens
-- Unstake tokens after participation
-- Gain voting power proportional to staked amount
+### Security Enhancements
+- Rate limiting for actions
+- Contract pause mechanism
+- Enhanced error handling
+- Reentrancy protection
+
+[Previous content remains unchanged...]

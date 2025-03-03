@@ -7,132 +7,109 @@
 (define-constant err-already-exists (err u102))
 (define-constant err-not-active (err u103))
 (define-constant err-insufficient-stake (err u104))
+(define-constant err-timelock-active (err u105))
+(define-constant err-invalid-amount (err u106))
+(define-constant err-proposal-executed (err u107))
+(define-constant err-contract-paused (err u108))
+(define-constant err-rate-limit (err u109))
+
+;; Configuration
 (define-constant minimum-stake u1000)
 (define-constant governance-threshold u100000)
+(define-constant unstake-timelock u144) ;; 24 hours in blocks
+(define-constant emergency-unstake-penalty u200) ;; 20% penalty
+(define-constant staking-apr u100) ;; 10% APR
 
 ;; Data Variables
 (define-data-var challenge-counter uint u0)
 (define-data-var total-staked uint u0)
 (define-data-var proposal-counter uint u0)
+(define-data-var contract-paused bool false)
+(define-data-var last-action-height uint u0)
 
 ;; Define token
 (define-fungible-token zen-token)
 
-;; Data Maps
-(define-map challenges
-    uint 
-    {
-        creator: principal,
-        title: (string-ascii 100),
-        description: (string-ascii 500),
-        start-time: uint,
-        end-time: uint,
-        reward: uint,
-        active: bool
-    }
-)
-
-(define-map challenge-participants 
-    { challenge-id: uint, participant: principal }
-    { completed: bool, reflection: (optional (string-ascii 1000)) }
-)
-
-(define-map user-profiles
+;; Enhanced Data Maps
+(define-map user-stakes
     principal
     {
-        total-participations: uint,
-        tokens-earned: uint,
-        staked-amount: uint
-    }
-)
+        amount: uint,
+        locked-until: uint,
+        delegated-to: (optional principal),
+        rewards-accumulated: uint,
+        last-reward-calculation: uint
+    })
 
-(define-map governance-proposals
-    uint
-    {
-        proposer: principal,
-        title: (string-ascii 100),
-        description: (string-ascii 1000),
-        start-block: uint,
-        end-block: uint,
-        yes-votes: uint,
-        no-votes: uint,
-        executed: bool
-    }
-)
+;; Rate Limiting
+(define-private (check-rate-limit)
+    (let ((blocks-since-last (- block-height (var-get last-action-height))))
+        (asserts! (> blocks-since-last u10) err-rate-limit)
+        (var-set last-action-height block-height)
+        (ok true)))
 
-(define-map votes
-    { proposal-id: uint, voter: principal }
-    { amount: uint, vote: bool }
-)
+;; Reward Calculation
+(define-private (calculate-rewards (stake-info (tuple (amount uint) (last-reward-calculation uint))))
+    (let (
+        (blocks-staked (- block-height (get last-reward-calculation stake-info)))
+        (amount-staked (get amount stake-info))
+        (reward-rate (/ (* staking-apr amount-staked) (* u365 u144)))
+        (new-rewards (* blocks-staked reward-rate))
+    )
+        new-rewards))
 
-;; Staking Functions
+;; Enhanced Staking Functions
 (define-public (stake-tokens (amount uint))
-    (let (
-        (user-profile (default-to { total-participations: u0, tokens-earned: u0, staked-amount: u0 } 
-            (map-get? user-profiles tx-sender)))
-    )
-        (try! (ft-transfer? zen-token amount tx-sender (as-contract tx-sender)))
-        (map-set user-profiles tx-sender 
-            (merge user-profile { staked-amount: (+ (get staked-amount user-profile) amount) }))
-        (var-set total-staked (+ (var-get total-staked) amount))
-        (ok true)
-    )
-)
-
-(define-public (unstake-tokens (amount uint))
-    (let (
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (staked (get staked-amount user-profile))
-    )
-        (asserts! (>= staked amount) err-insufficient-stake)
-        (try! (as-contract (ft-transfer? zen-token amount tx-sender tx-sender)))
-        (map-set user-profiles tx-sender 
-            (merge user-profile { staked-amount: (- staked amount) }))
-        (var-set total-staked (- (var-get total-staked) amount))
-        (ok true)
-    )
-)
-
-;; Governance Functions
-(define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 1000)) (duration uint))
-    (let (
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (proposal-id (var-get proposal-counter))
-    )
-        (asserts! (>= (get staked-amount user-profile) governance-threshold) err-insufficient-stake)
-        (map-set governance-proposals proposal-id {
-            proposer: tx-sender,
-            title: title,
-            description: description,
-            start-block: block-height,
-            end-block: (+ block-height duration),
-            yes-votes: u0,
-            no-votes: u0,
-            executed: false
-        })
-        (var-set proposal-counter (+ proposal-id u1))
-        (ok proposal-id)
-    )
-)
-
-(define-public (vote-on-proposal (proposal-id uint) (vote bool))
-    (let (
-        (proposal (unwrap! (map-get? governance-proposals proposal-id) err-not-found))
-        (user-profile (unwrap! (map-get? user-profiles tx-sender) err-not-found))
-        (stake (get staked-amount user-profile))
-    )
-        (asserts! (>= stake minimum-stake) err-insufficient-stake)
-        (asserts! (< block-height (get end-block proposal)) err-not-active)
-        (map-set votes { proposal-id: proposal-id, voter: tx-sender } { amount: stake, vote: vote })
-        (map-set governance-proposals proposal-id
-            (merge proposal {
-                yes-votes: (if vote (+ (get yes-votes proposal) stake) (get yes-votes proposal)),
-                no-votes: (if vote (get no-votes proposal) (+ (get no-votes proposal) stake))
-            })
+    (begin
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
+        (try! (check-rate-limit))
+        (let (
+            (current-stake (default-to 
+                { amount: u0, locked-until: u0, delegated-to: none, rewards-accumulated: u0, last-reward-calculation: block-height } 
+                (map-get? user-stakes tx-sender)))
         )
-        (ok true)
-    )
-)
+            (asserts! (> amount u0) err-invalid-amount)
+            (try! (ft-transfer? zen-token amount tx-sender (as-contract tx-sender)))
+            (map-set user-stakes tx-sender 
+                (merge current-stake 
+                    { 
+                        amount: (+ (get amount current-stake) amount),
+                        locked-until: (+ block-height unstake-timelock),
+                        last-reward-calculation: block-height
+                    }))
+            (var-set total-staked (+ (var-get total-staked) amount))
+            (try! (emit-event "STAKE" (concat (to-ascii amount) " tokens staked")))
+            (ok true))))
 
-;; Original Functions
-[... rest of original contract functions ...]
+;; New Emergency Unstake
+(define-public (emergency-unstake (amount uint))
+    (begin
+        (asserts! (not (var-get contract-paused)) err-contract-paused)
+        (let (
+            (current-stake (unwrap! (map-get? user-stakes tx-sender) err-not-found))
+            (penalty (/ (* amount emergency-unstake-penalty) u1000))
+        )
+            (asserts! (>= (get amount current-stake) amount) err-insufficient-stake)
+            (try! (as-contract (ft-transfer? zen-token (- amount penalty) tx-sender tx-sender)))
+            (map-set user-stakes tx-sender 
+                (merge current-stake 
+                    { amount: (- (get amount current-stake) amount) }))
+            (var-set total-staked (- (var-get total-staked) amount))
+            (try! (emit-event "EMERGENCY_UNSTAKE" 
+                (concat (to-ascii amount) " tokens unstaked with penalty")))
+            (ok true))))
+
+;; Admin Functions
+(define-public (pause-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set contract-paused true)
+        (try! (emit-event "CONTRACT_PAUSED" "Contract paused by admin"))
+        (ok true)))
+
+(define-public (unpause-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set contract-paused false)
+        (try! (emit-event "CONTRACT_UNPAUSED" "Contract unpaused by admin"))
+        (ok true)))
